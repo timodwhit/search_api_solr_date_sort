@@ -1,0 +1,145 @@
+<?php
+/**
+ * @file
+ * File for search_api_solr_date_sort.
+ */
+
+/**
+ * Implements hook_views_api().
+ */
+function search_api_solr_date_sort_views_api() {
+  return array(
+    'api' => 3,
+  );
+}
+
+/**
+ * Implementation of hook_views_data_alter().
+ */
+function search_api_solr_date_sort_views_data_alter(&$data) {
+  foreach (search_api_index_load_multiple(FALSE) as $index) {
+    $key = 'search_api_index_' . $index->machine_name;
+    // Change the base query class to allow for sorting by date. This is needed
+    // because we change the item_id to [id]-### for each additional date in a field.
+    $data[$key]['table']['base']['query class'] = 'search_api_solr_date_sort_views_query';
+    // Add the documented date string to the filter. They are not there originally,
+    // because the field is a list.
+    foreach($data[$key] as $k => $field) {
+      if (isset($field['type']) && $field['type'] == 'list<date>') {
+        // We copy over the base field, but adjust it to allow for the date to be
+        // interpretted as the string.
+        $data[$key][$k . '_string'] = $field;
+        $data[$key][$k . '_string']['title'] = t('Indexed String: ') . $field['title'];
+        $data[$key][$k . '_string']['help'] = t('Single String version of ' . $field['real field']);
+        $data[$key][$k . '_string']['type'] = 'date';
+        // Default does not have a sort option, so we add it.
+        $data[$key][$k . '_string']['sort'] = array(
+          'handler' => 'SearchApiViewsHandlerSort',
+        );
+        if (isset($field['field'])) {
+          $data[$key][$k . '_string']['field']['click sortable'] = TRUE;
+        }
+        // This is the field that is passed to the getFields() method and used for
+        // the actual querying.
+        $data[$key][$k . '_string']['real field'] = search_api_solr_date_sort_to_string($field['real field']);
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_search_api_solr_documents_alter().
+ *
+ * @ref SearchApiSolrDocument
+ */
+function search_api_solr_date_sort_search_api_solr_documents_alter(&$documents, SearchApiIndex $index, array $items) {
+  // Grab all of the list<date> fields to process out the start and end date.
+  $date_fields = _search_api_solr_date_sort_date_fields($index, 'dm');
+  // Create a new array of new documents that will get added into the solr index.
+  $new_documents = array();
+  foreach ($documents as $document) {
+    foreach ($date_fields as $field) {
+      // Grab the date field values.
+      $dates = $document->getField($field);
+      // If that is not empty append the field.
+      if (!empty($dates['value'])) {
+        $string_field = substr_replace($field, 'ds_', 0, 3);
+        // We account for multiple values of dates by storing each entity as a
+        // new instance.
+        //
+        // @todo: Add handling for those that don't want to add an item for each date
+        // instance.
+        foreach ($dates['value'] as $i => $date) {
+          if ($i == 0) {
+            // For the first one, grab that.
+            $document->setField($string_field, $date);
+          }
+          else {
+            // Clone the document to add it to the index.
+            $new_document = clone $document;
+            // If there are multiple dates, we need an id for each date. Thus,
+            // append -###.
+            $item_id = $document->getField('item_id');
+            $item_id = $item_id['value'] . '-' . $i;
+            $new_document->setField('item_id', $item_id);
+            // Add the specific date for this document.
+            $new_document->setField($string_field, $date);
+            $new_documents[] = $new_document;
+          }
+        }
+      }
+    }
+  }
+  $documents = array_merge($documents, $new_documents);
+}
+
+
+/**
+ * Creates the initial callback fields
+ */
+function _search_api_solr_date_sort_date_fields($index, $prefix) {
+  $fields = $index->getFields();
+  $date_fields = array();
+  foreach($fields as $id => $props) {
+    if ($props['type'] == 'list<date>') {
+      $name = search_api_solr_date_sort_to_string($id, $prefix);
+      $date_fields[] = $name;
+    }
+    else {
+      continue;
+    }
+  }
+  return $date_fields;
+}
+
+/**
+ * Custom function to produce the proper name out of the real field id.
+ */
+function search_api_solr_date_sort_to_string($field, $prefix = 'ds') {
+  return $prefix . '_' . str_replace(':', '$', $field);
+}
+
+/**
+ * Implements hook_search_api_solr_field_mapping_alter(_.
+ */
+function search_api_solr_date_sort_search_api_solr_field_mapping_alter(SearchApiIndex $index, array &$fields) {
+  $index_fields = $index->getFields();
+  $date_fields = array();
+  foreach($index_fields as $id => $props) {
+    if ($props['type'] == 'list<date>') {
+      $fields[search_api_solr_date_sort_to_string($id)] = search_api_solr_date_sort_to_string($id);
+    }
+  }
+}
+
+/**
+ * Implements hook_search_api_service_info_alter().
+ */
+function search_api_solr_date_sort_search_api_service_info_alter(array &$service_info) {
+  foreach ($service_info as $id => $info) {
+    if ($id == 'search_api_solr_service') {
+      // We need to extend the base class to allow fo ours to sort the
+      $service_info[$id]['class'] = 'SearchApiSolrDateSortSolrService';
+    }
+  }
+}
